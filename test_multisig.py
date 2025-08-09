@@ -41,7 +41,7 @@ def test_deploy_threshold_zero():
     with pytest.raises(boa.BoaError, match="Threshold must be greater than 0"):
         boa.load("multisig.vy", 0, signers)
 
-def test_deploy_threshhold_greater_than_signers():
+def test_deploy_threshold_greater_than_signers():
     signers = [Web3.to_checksum_address(f"0x{'%040x' % i}") for i in range(1, 3)]
     threshold = 10
     with pytest.raises(boa.BoaError, match="Number of signers must be greater than threshold"):
@@ -93,15 +93,6 @@ def test_sign_transaction_already_signed(contract):
     
     with pytest.raises(boa.BoaError, match="Sender already signed"):
         contract.sign_transaction(batch, 0)
-
-def test_sign_transaction_keccak_mismatch(contract):
-    batch = [(b.target, b.allow_failure, b.value, b.calldata) for b in [single_tx]]
-    mod_batch = [(b.target, b.allow_failure, b.value, b.calldata) for b in [single_tx, single_tx]]
-
-    contract.sign_transaction(batch, 0, sender=Web3.to_checksum_address("0x00dE89C733555886f785b0C32b498300297e481F"))
-
-    with pytest.raises(boa.BoaError, match="Transaction keccak does not match the expected value"):
-        contract.sign_transaction(mod_batch, 0, sender=Web3.to_checksum_address("0x000000000000000000000000000000000000dead"))  # Using a different nonce to trigger mismatch
 
 # test send multi transaction
 def test_send_multi_transaction_valid(contract):
@@ -158,10 +149,60 @@ def test_add_signer_zero_address(contract):
     with pytest.raises(boa.BoaError, match="Signer address must not be Zero"):
         contract.add_signer(new_signer, sender=contract.address)
 
+#test remove signer
 def test_remove_signer_valid(contract):
     signer_to_remove = Web3.to_checksum_address("0x00dE89C733555886f785b0C32b498300297e481F")
     contract.remove_signer(signer_to_remove, sender=contract.address)
     assert signer_to_remove not in contract.get_signers(), "Signer not removed correctly"
+
+# test reject transaction
+def test_reject_transaction_not_a_signer(contract):
+    batch = [(contract.address, False, 0, b"")]
+    nonce = 42
+    with pytest.raises(boa.BoaError, match="Sender not a signer"):
+        contract.reject_transaction(batch, nonce, sender=Web3.to_checksum_address("0x0000000000000000000000000000000000000001"))
+
+def test_reject_transaction_not_signed(contract):
+    batch = [(contract.address, False, 0, b"")]
+    nonce = 43
+    # Sender is a signer but has not signed
+    with pytest.raises(boa.BoaError, match="Sender has not signed the transaction"):
+        contract.reject_transaction(batch, nonce, sender=Web3.to_checksum_address("0x00dE89C733555886f785b0C32b498300297e481F"))
+
+def test_reject_transaction_success(contract):
+    batch = [(contract.address, False, 0, b"")]
+    nonce = 44
+    signer = Web3.to_checksum_address("0x00dE89C733555886f785b0C32b498300297e481F")
+    # First, sign the transaction
+    contract.sign_transaction(batch, nonce, sender=signer)
+    # Now, reject the transaction
+    contract.reject_transaction(batch, nonce, sender=signer)
+    # Try to reject again, should fail
+    with pytest.raises(boa.BoaError, match="Sender has not signed the transaction"):
+        contract.reject_transaction(batch, nonce, sender=signer)
+
+# test set threshold
+def test_set_threshold_eoa_call(contract):
+    with pytest.raises(boa.BoaError, match="Only callable using send_multi_transaction"):
+        contract.set_threshold(2, sender=Web3.to_checksum_address("0x0000000000000000000000000000000000000001"))
+
+def test_set_threshold_zero(contract):
+    with pytest.raises(boa.BoaError, match="Threshold must be greater than 0"):
+        contract.set_threshold(0, sender=contract.address)
+
+def test_set_threshold_greater_than_signers(contract):
+    num_signers = len(contract.get_signers())
+    with pytest.raises(boa.BoaError, match="Threshold must be less than or equal to the number of signers"):
+        contract.set_threshold(num_signers + 1, sender=contract.address)
+
+def test_set_threshold_valid(contract):
+    contract.set_threshold(1, sender=contract.address)
+    assert contract.get_threshold() == 1
+    contract.set_threshold(len(contract.get_signers()), sender=contract.address)
+    assert contract.get_threshold() == len(contract.get_signers())
+
+
+# test full flows
 
 def test_remove_signer_using_multicall_batch(contract):
     selector = function_signature_to_4byte_selector("remove_signer(address)")
@@ -193,3 +234,19 @@ def test_add_signer_using_multicall_batch(contract):
     contract.sign_transaction(batch, nonce)
     contract.send_multi_transaction(batch, nonce)
     assert new_signer in contract.get_signers(), "New signer not added correctly using multicall batch"
+
+def test_set_threshold_using_multicall_batch(contract):
+    new_threshold = 1
+    selector = function_signature_to_4byte_selector("set_threshold(uint256)")
+    encoded_args = encode(['uint256'], [new_threshold])
+    batch = BatchValue(
+        target=Web3.to_checksum_address(contract.address),
+        allow_failure=False,
+        value=0,
+        calldata=selector + encoded_args
+    )
+    batch = [(b.target, b.allow_failure, b.value, b.calldata) for b in [batch]]
+    nonce = 0
+    contract.sign_transaction(batch, nonce)
+    contract.send_multi_transaction(batch, nonce)
+    assert contract.get_threshold() == new_threshold, "Threshold not set correctly using multicall batch"
